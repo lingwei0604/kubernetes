@@ -330,11 +330,13 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 	}()
 
 	// close socket after delayed stopCh
+	// 调用 s.NonBlockingRun 完成启动流程
 	stoppedCh, err := s.NonBlockingRun(delayedStopCh)
 	if err != nil {
 		return err
 	}
 
+	// 当收到退出信号后完成一些收尾工作
 	<-stopCh
 
 	// run shutdown hooks directly. This includes deregistering from the kubernetes endpoint in case of kube-apiserver.
@@ -357,6 +359,15 @@ func (s preparedGenericAPIServer) Run(stopCh <-chan struct{}) error {
 // NonBlockingRun spawns the secure http server. An error is
 // returned if the secure port cannot be listened on.
 // The returned channel is closed when the (asynchronous) termination is finished.
+
+/*
+	s.NonBlockingRun 的主要逻辑为：
+
+	1、判断是否要启动审计日志服务；
+	2、调用 s.SecureServingInfo.Serve 配置并启动 https server；
+	3、执行 postStartHooks；
+	4、向 systemd 发送 ready 信号；
+*/
 func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) (<-chan struct{}, error) {
 	// Use an stop channel to allow graceful shutdown without dropping audit events
 	// after http server shutdown.
@@ -364,12 +375,14 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) (<-chan
 
 	// Start the audit backend before any request comes in. This means we must call Backend.Run
 	// before http server start serving. Otherwise the Backend.ProcessEvents call might block.
+	// 1、判断是否要启动审计日志
 	if s.AuditBackend != nil {
 		if err := s.AuditBackend.Run(auditStopCh); err != nil {
 			return nil, fmt.Errorf("failed to run the audit backend: %v", err)
 		}
 	}
 
+	// 2、启动 https server
 	// Use an internal stop channel to allow cleanup of the listeners on error.
 	internalStopCh := make(chan struct{})
 	var stoppedCh <-chan struct{}
@@ -396,8 +409,10 @@ func (s preparedGenericAPIServer) NonBlockingRun(stopCh <-chan struct{}) (<-chan
 		close(auditStopCh)
 	}()
 
+	// 3、执行 postStartHooks
 	s.RunPostStartHooks(stopCh)
 
+	// 4、向 systemd 发送 ready 信号
 	if _, err := systemd.SdNotify(true, "READY=1\n"); err != nil {
 		klog.Errorf("Unable to send systemd daemon successful start message: %v\n", err)
 	}
